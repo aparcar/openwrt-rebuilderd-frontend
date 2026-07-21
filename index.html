@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>OpenWrt &ndash; reproducible wireless freedom!</title>
+    <link rel="stylesheet" href="style.css">
+    <link rel="shortcut icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='10' fill='%2300b5e2'/%3E%3Ctext x='50%25' y='50%25' dominant-baseline='central' text-anchor='middle' font-family='sans-serif' font-weight='700' font-size='28' fill='white'%3EOW%3C/text%3E%3C/svg%3E">
+  </head>
+  <body>
+    <header class="hero">
+      <div class="hero-inner">
+        <div class="brand">
+          <pre class="logo-ascii" aria-hidden="true">
+  _______                     ________        __
+ |       |.-----.-----.-----.|  |  |  |.----.|  |_
+ |   -   ||  _  |  -__|     ||  |  |  ||   _||   _|
+ |_______||   __|_____|__|__||________||__|  |____|
+          |__| W I R E L E S S   F R E E D O M
+</pre>
+          <h1>OpenWrt &ndash; <em>reproducible</em> wireless freedom!</h1>
+          <p class="subtitle">
+            Verification rebuilds of OpenWrt apk packages and firmware images,
+            powered by <a href="https://github.com/kpcyrd/rebuilderd">rebuilderd</a>.
+          </p>
+        </div>
+        <ul id="overview" class="overview">
+          <li class="loading">Loading stats…</li>
+        </ul>
+      </div>
+    </header>
+    <div class="toolbar">
+      <div class="toolbar-inner">
+        <div id="distro-buttons" class="distro-buttons" role="group" aria-label="Dataset"></div>
+        <input id="search" type="search" placeholder="Search by name, version, or architecture…" autocomplete="off" spellcheck="false">
+        <span id="search-count" class="search-count"></span>
+      </div>
+    </div>
+    <main id="content">
+      <p class="loading">Loading packages…</p>
+    </main>
+    <footer>
+      <p>
+        OpenWrt rebuilder status. Source code based on
+        <a href="https://gitlab.archlinux.org/archlinux/rebuilderd-website">rebuilderd-website</a>.
+      </p>
+      <p>
+        Attestations are signed in-toto links. To verify them, fetch this
+        rebuilder's <a href="/api/v1/meta/public-keys" target="_blank" rel="noreferrer">public key</a>
+        and pass it to <code>in-toto-verify</code> alongside the
+        <code>attest</code> file from a package above.
+      </p>
+      <p class="retro">
+        <span class="blink">●</span> best viewed at 800&times;600 &middot;
+        powered by reproducible builds &middot; no cookies, no JS frameworks
+      </p>
+    </footer>
+    <script src="app.js" defer></script>
+  </body>
+</html>

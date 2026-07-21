@@ -1,0 +1,15 @@
+# Env placeholders keep `caddy run` here working out of the box (the defaults),
+# while docker-compose overrides them: SITE_ADDRESS=:8882 to bind all interfaces,
+# REBUILDERD_UPSTREAM=daemon:8484 to reach the daemon service, SITE_ROOT=/srv.
+{$SITE_ADDRESS:http://localhost:8882}
+
+encode gzip
+
+handle /api/* {
+    reverse_proxy {$REBUILDERD_UPSTREAM:127.0.0.1:8484}
+}
+
+handle {
+    root * {$SITE_ROOT:.}
+    file_server
+}

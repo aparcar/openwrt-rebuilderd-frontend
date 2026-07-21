@@ -1,0 +1,373 @@
+/* 90s OpenWrt "kamikaze" look, after tests.reproducible-builds.org/openwrt/
+   — slate-blue page, light-grey beveled panels, Verdana, the WIRELESS FREEDOM
+   ASCII logo in monospace, and the classic blue/green link colours. */
+:root {
+  --slate: #4a6b7c;        /* page background */
+  --slate-dark: #2f4a58;
+  --header: #557788;       /* header + toolbar bars */
+  --panel: #f5f5f5;        /* content panels */
+  --ink: #000000;          /* text on panels */
+  --muted: #555555;
+  --border: #666666;
+  --accent: #bbddee;       /* table/group headers, little tags */
+  --link: #0022aa;
+  --link-hover: #00aa33;
+  --status-good: #00aa33;
+  --status-bad: #cc0000;
+  --status-fail: #dd7700;
+  --status-unknown: #888888;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  /* The classic OpenWrt page background: slate base with the horizon strip
+     pinned to the bottom, tiled horizontally (from cascade.css). */
+  background: var(--slate) url(bg.jpg) bottom center repeat-x fixed;
+  color: #ffffff;
+  font-family: Verdana, Arial, Helvetica, sans-serif;
+  font-size: 14px;
+  line-height: 1.4;
+}
+
+a { color: var(--link); text-decoration: none; }
+a:visited { color: var(--link); }
+a:hover { color: var(--link-hover); text-decoration: underline; }
+
+/* ---- header: ascii logo + title ---- */
+.hero {
+  background: var(--header);
+  border-bottom: 3px ridge #88aabb;
+  padding: 1rem 1.5rem 1.25rem;
+}
+
+.hero-inner { max-width: 1100px; margin: 0 auto; }
+.hero a { color: #cdeeff; }
+.hero a:hover { color: #ffffff; }
+
+.brand { margin-bottom: 1rem; }
+
+.logo-ascii {
+  margin: 0 0 0.5rem;
+  font-family: "Courier New", monospace;
+  font-size: 12px;
+  line-height: 1.05;
+  color: #ffffff;
+  text-shadow: 1px 1px 0 #2f4a58;
+  overflow-x: auto;
+  white-space: pre;
+}
+
+/* keep the legacy box logo hidden if present */
+.logo { display: none; }
+
+h1 {
+  margin: 0;
+  font-size: 1.6rem;
+  font-weight: bold;
+  color: #ffffff;
+  text-shadow: 1px 1px 0 #2f4a58;
+}
+h1 em { color: #ffe680; font-style: italic; }
+
+.subtitle { margin: 0.35rem 0 0; color: #e6eef2; font-size: 0.95rem; }
+
+/* ---- overview stat boxes (beveled, light on the slate header) ---- */
+.overview {
+  list-style: none;
+  padding: 0;
+  margin: 1.25rem 0 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 0.75rem;
+}
+
+.overview li {
+  background: var(--panel);
+  color: var(--ink);
+  border: 2px outset #d6e4ee;
+  padding: 0.6rem 0.85rem;
+}
+
+.overview .stat-name { display: block; font-weight: bold; margin-bottom: 0.2rem; }
+.overview .stat-percent { font-size: 1.5rem; font-weight: bold; color: var(--status-good); }
+.overview .stat-breakdown { display: block; font-size: 0.85rem; color: var(--muted); margin-top: 0.2rem; }
+
+/* ---- toolbar: retro form controls ---- */
+.toolbar {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  background: var(--header);
+  border-bottom: 2px solid var(--slate-dark);
+}
+
+.toolbar-inner {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 0.6rem 1.5rem;
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+
+#search {
+  font-family: Verdana, Arial, sans-serif;
+  font-size: 0.95rem;
+  padding: 0.35rem 0.5rem;
+  border: 2px inset #cdd8df;
+  background: #ffffff;
+  color: var(--ink);
+  outline: none;
+  flex: 1;
+  min-width: 180px;
+}
+
+/* ---- dataset toggle: two beveled buttons ---- */
+.distro-buttons { display: inline-flex; }
+.distro-btn {
+  font-family: Verdana, Arial, sans-serif;
+  font-size: 0.95rem;
+  padding: 0.35rem 0.7rem;
+  border: 2px outset #cdd8df;
+  background: #e8f2f8;
+  color: var(--slate-dark);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.distro-btn + .distro-btn { border-left-width: 1px; }
+.distro-btn:hover { background: #d8eaf4; }
+.distro-btn.active {
+  border-style: inset;
+  background: var(--slate-dark);
+  color: #ffffff;
+  cursor: default;
+}
+
+.search-count { color: #e6eef2; font-size: 0.85rem; white-space: nowrap; }
+
+/* ---- content ---- */
+main { max-width: 1100px; margin: 1.25rem auto; padding: 0 1.5rem 3rem; }
+
+.suite {
+  background: var(--panel);
+  color: var(--ink);
+  border: 2px outset #d6e4ee;
+  margin-bottom: 1.25rem;
+}
+
+/* the release header doubles as the disclosure toggle for its sub-menu */
+.suite-header {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  padding: 0.5rem 1.25rem;
+  background: var(--accent);
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+  user-select: none;
+  list-style: none;
+}
+.suite-header::-webkit-details-marker { display: none; }
+.suite-header::before {
+  content: '▸';
+  width: 0.8rem;
+  font-size: 0.8rem;
+  color: var(--slate-dark);
+}
+.suite[open] > .suite-header::before { content: '▾'; }
+.suite-header:hover .suite-title { text-decoration: underline; }
+
+.suite-body { padding: 0.15rem 1.25rem 1rem; }
+
+.suite-title { margin: 0; font-size: 1.15rem; font-weight: bold; color: var(--slate-dark); }
+.suite-counts { margin-left: auto; font-size: 0.85rem; color: var(--muted); }
+.suite-counts .count { font-weight: bold; margin-right: 0.75rem; }
+.count.good { color: var(--status-good); }
+.count.bad { color: var(--status-bad); }
+.count.fail { color: var(--status-fail); }
+.count.unknown { color: var(--status-unknown); }
+/* the reproducible share of everything rebuilt, set apart from the raw counts */
+.count.repro { color: var(--slate-dark); border-left: 1px solid #cdd8df; padding-left: 0.75rem; }
+
+/* ---- nested grouping levels: arch (packages) / target / subtarget (images) ---- */
+.subgroup { margin-top: 0.6rem; }
+
+.subgroup-title {
+  display: flex;
+  align-items: baseline;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  cursor: pointer;
+  user-select: none;
+  list-style: none;
+  padding: 0.25rem 0.45rem;
+  background: #e8eef2;
+  border: 1px solid #cdd8df;
+}
+.subgroup-title::-webkit-details-marker { display: none; }
+.subgroup-title::before {
+  content: '▸';
+  width: 0.7rem;
+  font-size: 0.7rem;
+  color: var(--muted);
+}
+.subgroup[open] > .subgroup-title::before { content: '▾'; }
+.subgroup-title:hover .subgroup-name { text-decoration: underline; }
+.subgroup-name { font-weight: bold; color: var(--slate-dark); }
+.subgroup-counts { font-size: 0.8rem; color: var(--muted); }
+.subgroup-counts .count { font-weight: bold; margin-right: 0.6rem; }
+
+/* the left rule + indent is what makes the release > target > subtarget nesting read */
+.subgroup-body {
+  margin: 0.3rem 0 0 0.4rem;
+  padding-left: 0.85rem;
+  border-left: 2px solid #d6dee4;
+}
+
+.status-group { margin-top: 0.85rem; }
+.status-group > .pkg-list { margin-top: 0.4rem; }
+
+.status-group-title {
+  font-size: 0.9rem;
+  font-weight: bold;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin: 0;
+  cursor: pointer;
+  list-style: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  user-select: none;
+}
+.status-group-title::-webkit-details-marker { display: none; }
+.status-group-title::before {
+  content: '▸';
+  width: 0.7rem;
+  font-size: 0.7rem;
+  color: var(--muted);
+}
+.status-group[open] > .status-group-title::before { content: '▾'; }
+.status-group-title:hover { text-decoration: underline; }
+.status-group-title.good { color: var(--status-good); }
+.status-group-title.bad { color: var(--status-bad); }
+.status-group-title.fail { color: var(--status-fail); }
+.status-group-title.unknown { color: var(--status-unknown); }
+
+/* one file per line — a plain single-column list, never a multi-column grid */
+.pkg-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: block;
+}
+.pkg-list li { display: block; }
+
+.pkg-row {
+  padding: 0.12rem 0;
+  font-size: 0.9rem;
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+}
+
+/* ---- per-image version history ---- */
+.history { margin: 0 0 0.25rem 1.35rem; }
+.history-title {
+  font-size: 0.78rem;
+  color: var(--slate-dark);
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+.history-title::-webkit-details-marker { display: none; }
+.history-title::before { content: '▸ '; color: var(--muted); }
+.history[open] > .history-title::before { content: '▾ '; }
+.history-title:hover { text-decoration: underline; }
+
+.history-list { list-style: none; padding: 0.2rem 0 0; margin: 0; }
+.history-list li {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  padding: 0.08rem 0;
+  font-size: 0.82rem;
+}
+.history-status { text-transform: uppercase; font-size: 0.7rem; letter-spacing: 0.5px; min-width: 3.5rem; }
+.history-version { font-family: "Courier New", monospace; color: var(--ink); }
+.history-list .pkg-links { margin-left: auto; }
+
+.dot {
+  display: inline-block;
+  width: 0.6rem;
+  height: 0.6rem;
+  border: 1px solid rgba(0, 0, 0, 0.35);
+  flex: 0 0 auto;
+}
+.dot.good { background: var(--status-good); }
+.dot.bad { background: var(--status-bad); }
+.dot.fail { background: var(--status-fail); }
+.dot.unknown { background: var(--status-unknown); }
+
+.pkg-name { font-weight: bold; color: var(--ink); }
+.pkg-version { color: var(--muted); font-size: 0.82rem; }
+
+.pkg-arch {
+  font-size: 0.72rem;
+  color: var(--slate-dark);
+  background: var(--accent);
+  border: 1px solid var(--border);
+  padding: 0 0.35rem;
+}
+
+.pkg-links { margin-left: auto; display: inline-flex; gap: 0.35rem; }
+.pkg-links a {
+  font-size: 0.78rem;
+  color: var(--slate-dark);
+  background: #e8f2f8;
+  border: 2px outset #cfe2ee;
+  padding: 0 0.35rem;
+}
+.pkg-links a:hover { background: #d8eaf4; text-decoration: none; }
+
+.loading { color: #e6eef2; font-style: italic; }
+.error {
+  background: #ffe0dd;
+  border: 2px outset #f3b8b1;
+  color: var(--status-bad);
+  padding: 1rem 1.25rem;
+}
+
+/* ---- footer ---- */
+footer {
+  border-top: 3px ridge #88aabb;
+  background: var(--header);
+  padding: 1rem 1.5rem;
+  text-align: center;
+  color: #e6eef2;
+  font-size: 0.85rem;
+}
+footer p { margin: 0.35rem 0; }
+footer a { color: #cdeeff; }
+footer code {
+  background: var(--panel);
+  color: var(--ink);
+  padding: 0 0.3rem;
+  font-family: "Courier New", monospace;
+  font-size: 0.85em;
+}
+.retro { font-family: "Courier New", monospace; }
+.blink { animation: blink 1.2s steps(2, start) infinite; }
+@keyframes blink { to { visibility: hidden; } }
+
+@media (max-width: 600px) {
+  h1 { font-size: 1.3rem; }
+  .logo-ascii { font-size: 9px; }
+  .pkg-links { margin-left: 0; }
+}
