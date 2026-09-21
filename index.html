@@ -33,6 +33,7 @@
       <div class="toolbar-inner">
         <div id="distro-buttons" class="distro-buttons" role="group" aria-label="Dataset"></div>
         <input id="search" type="search" placeholder="Search by name, version, or architecture…" autocomplete="off" spellcheck="false">
+        <div id="sort-buttons" class="sort-buttons" role="group" aria-label="Sort by"></div>
         <span id="search-count" class="search-count"></span>
       </div>
     </div>
@@ -49,10 +50,6 @@
         rebuilder's <a href="/api/v1/meta/public-keys" target="_blank" rel="noreferrer">public key</a>
         and pass it to <code>in-toto-verify</code> alongside the
         <code>attest</code> file from a package above.
-      </p>
-      <p class="retro">
-        <span class="blink">●</span> best viewed at 800&times;600 &middot;
-        powered by reproducible builds &middot; no cookies, no JS frameworks
       </p>
     </footer>
     <script src="app.js" defer></script>

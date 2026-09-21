@@ -2,16 +2,31 @@
 
 // Status page for an OpenWrt rebuilderd instance.
 //
-// It fetches every tracked record, collapses each image to its newest version
-// for the main tree (grouped release -> component -> status), and keeps the
-// older versions as an inline per-image history. We dedupe client-side rather
-// than relying on the daemon's `seen_only` flag: that flag is scoped per
-// (distribution, release, architecture) with no component, so syncing one
-// firmware target (they share the x86_64 build-host arch) wrongly marks the
-// others unseen and they'd vanish from the page.
+// It fetches the currently-published record of each package or image for the
+// main tree (grouped release -> component -> status) and shows the latest
+// verdict for each — one row per package or image, no rebuild history. The
+// history used to come from an unfiltered /api/v1/builds, which is every
+// rebuild ever recorded: on a 20GB database that is a multi-hundred-megabyte
+// response the page then folded back down to a handful of rows per package.
+// Whoever wants the older runs can ask the daemon for them directly.
+//
+// The daemon does the filtering, via `seen_only`: asking it for every version
+// and reducing here meant pulling 3x the rows (15k against 5k for images, 8MB
+// of JSON). The flag is only as good as the last sync, though — it is scoped
+// per (distribution, release, architecture) with no component, so a target
+// syncing on its own can leave the rest marked unseen, and anything unseen is
+// simply absent from the page rather than flagged. If images or packages you
+// expect are missing, that is the first thing to check.
 
 const API_BASE = (typeof window !== 'undefined' && window.REBUILDERD_API) || '';
-const PAGE_LIMIT = 1000;
+// One big page instead of many small ones. The daemon caps nothing, and paging
+// is a cursor (`after`), so every page costs a full round-trip before the next
+// can start: the images dataset took 16 sequential requests and ~18s at 1000 a
+// time, against ~2s for the single request it fits in now.
+const PAGE_LIMIT = 50000;
+
+const DOWNLOADS_URL = 'https://downloads.openwrt.org';
+const REBUILDER_REPO = 'https://github.com/aparcar/openwrt-rebuilder';
 
 const DISTROS = [
   { id: 'openwrt-package', label: 'Packages' },
@@ -21,11 +36,44 @@ const DISTROS = [
 const STATUS_ORDER = ['BAD', 'FAIL', 'UNKWN', 'GOOD'];
 const STATUS_LABEL = { GOOD: 'good', BAD: 'bad', FAIL: 'fail', UNKWN: 'unknown' };
 
+const byName = (a, b) => a.name.localeCompare(b.name, undefined, { numeric: true });
+
+// Most recently rebuilt first, keyed on build_id: a build row is created per
+// rebuild, so the id tracks when this package was last checked. Not the binary
+// record's own id — that one is sync insertion order, which is alphabetical, so
+// using it made this sort a reverse-alphabetical one. Rows never rebuilt have no
+// build_id and sort last; images share one build per target, so both cases fall
+// back to name.
+function byLastBuild(a, b) {
+  if (a.build_id == null || b.build_id == null) {
+    if (a.build_id == null && b.build_id == null) return byName(a, b);
+    return a.build_id == null ? 1 : -1;
+  }
+  return b.build_id - a.build_id || byName(a, b);
+}
+
+// Ordering within each leaf status list.
+const SORTS = [
+  { id: 'name', label: 'Name', cmp: byName },
+  { id: 'recent', label: 'Last result', cmp: byLastBuild },
+];
+
+// Target/arch groups take the same ordering as the rows inside them. Images are
+// why this exists: one run rebuilds a whole target, so every image in a group
+// carries that run's build_id and the row sort within a group is all ties — the
+// recency signal only shows up between groups.
+function sortGroups(groups) {
+  if (sort !== 'recent') return groups; // groupBy already ordered them by name
+  const newest = (pkgs) => pkgs.reduce((max, p) => (p.build_id > max ? p.build_id : max), -1);
+  return [...groups].sort((a, b) => newest(b[1]) - newest(a[1])
+    || a[0].localeCompare(b[0], undefined, { numeric: true }));
+}
+
 let currentDistro = DISTROS[0].id;
-let allPkgs = [];              // newest version of each image (deduped)
-let historyByKey = new Map();  // imageKey -> [records, newest first]
-let dashboard = null;          // reproducibility + queue stats
+let allPkgs = [];               // newest version of each image (deduped)
+let dashboard = null;           // reproducibility + queue stats
 let search = '';
+let sort = SORTS[0].id;
 
 // Identity of an image across versions: everything but the version.
 function imageKey(p) {
@@ -84,25 +132,32 @@ function matches(pkg) {
 }
 
 // ---- data ----
-async function fetchAll() {
+async function fetchPaged(path, extra = {}) {
   const records = [];
   let after = null;
   for (;;) {
     const params = new URLSearchParams({
       distribution: currentDistro,
       limit: String(PAGE_LIMIT),
+      ...extra,
     });
     if (after != null) params.set('after', String(after));
-    const page = await fetchJSON(`/api/v1/packages/binary?${params}`);
+    const page = await fetchJSON(`${path}?${params}`);
     const recs = page.records || [];
     records.push(...recs);
-    if (recs.length < PAGE_LIMIT) return records;
+    // Stop on the record count rather than on a short page: should the daemon
+    // ever start capping `limit` below what we ask for, every page would come
+    // back short and a short-page test would silently truncate the tree.
+    if (!recs.length || (page.total != null && records.length >= page.total)) return records;
     after = recs[recs.length - 1].id;
   }
 }
 
-// Group every record by image; the newest version of each (highest binary id)
-// is what the tree shows, the full list becomes that image's history.
+// A backstop for `seen_only`: it already returns one row per package or image,
+// so this normally passes everything through untouched. Should two versions of
+// one thing ever come back as seen, the newest (highest binary id) wins — an
+// older row would otherwise show today's verdict as if it were that version's
+// own, since a binary row only ever points at the newest build of its target.
 function collapseVersions(records) {
   const byKey = new Map();
   for (const r of records) {
@@ -114,7 +169,6 @@ function collapseVersions(records) {
     list.sort((a, b) => b.id - a.id); // newest first
     latest.push(list[0]);
   }
-  historyByKey = byKey;
   return latest;
 }
 
@@ -192,42 +246,111 @@ function renderPkg(pkg) {
   const links = renderLinks(pkg);
   if (links) row.appendChild(links);
 
-  const li = el('li', {}, [row]);
-  const history = historyByKey.get(imageKey(pkg)) || [];
-  if (history.length > 1) li.appendChild(renderHistory(history));
-  return li;
+  return el('li', {}, [row]);
 }
 
-// Collapsed timeline of every version of one image, newest first — so you can
-// see when it started or stopped reproducing. Built from the fetched records,
-// no extra request.
-function renderHistory(records) {
-  const details = el('details', { class: 'history' });
-  details.appendChild(el('summary', { class: 'history-title', text: `history (${records.length})` }));
-  const list = el('ul', { class: 'history-list' });
-  for (const r of records) {
-    const st = statusOf(r);
-    const li = el('li', {}, [
-      el('span', { class: `dot ${STATUS_LABEL[st]}` }),
-      el('span', { class: 'history-status', text: STATUS_LABEL[st] }),
-      el('span', { class: 'history-version', text: r.version || '' }),
-    ]);
-    const links = renderLinks(r);
-    if (links) li.appendChild(links);
-    list.appendChild(li);
+// ---- rebuild instructions ----
+// openwrt-rebuilder writes its artifacts to --output and compares nothing
+// itself, so anyone can redo a rebuild here without running a rebuilderd
+// instance and diff the result against downloads.openwrt.org.
+
+// The release ids come from rebuilderd's sync config, which names them after
+// the git ref ("main", "openwrt-24.10", "v24.10.0"); --release wants the
+// OpenWrt version behind it ("SNAPSHOT", "24.10-SNAPSHOT", "24.10.0").
+function releaseArg(release) {
+  if (!release || release === 'SNAPSHOT' || release === 'main') return 'SNAPSHOT';
+  if (release.startsWith('openwrt-')) return `${release.slice('openwrt-'.length)}-SNAPSHOT`;
+  return release.replace(/^v/, '');
+}
+
+// …and the directory that release publishes under, same mapping upstream's
+// importer uses to build the URLs it syncs from.
+function releasePath(release) {
+  const version = releaseArg(release);
+  return version === 'SNAPSHOT' ? 'snapshots' : `releases/${version}`;
+}
+
+function shellLines(...lines) {
+  return lines.join(' \\\n    ');
+}
+
+// What it takes to recreate this group's files: images are rebuilt a whole
+// target at a time and packages one apk at a time. A package command therefore
+// needs one concrete file, so it quotes the first of the group and leaves
+// swapping it to the reader.
+function rebuildInfo(pkgs) {
+  const first = pkgs[0];
+  const release = first && first.release;
+  if (!release) return null;
+  const clone = `git clone ${REBUILDER_REPO}\ncd openwrt-rebuilder\n`;
+
+  if (currentDistro === 'openwrt-image') {
+    const target = first.component || first.architecture;
+    if (!target) return null;
+    return {
+      note: 'Rebuilds every image of this target from source the way the buildbots do: '
+        + 'openwrt.git at the published commit, feeds and .config restored from the target\'s buildinfo.',
+      cmd: clone + shellLines(
+        'uv run openwrt-rebuilder firmware',
+        `--target ${target}`,
+        `--release ${releaseArg(release)}`,
+        '--output ./out',
+      ),
+      published: `${DOWNLOADS_URL}/${releasePath(release)}/targets/${target}/`,
+      publishedLabel: `the published images of ${target}`,
+    };
   }
-  details.appendChild(list);
-  return details;
+
+  const sample = [...pkgs].sort(SORTS[0].cmp)[0];
+  const file = `${sample.name}-${sample.version}.apk`;
+  const feed = `${releasePath(release)}/packages/${sample.architecture}/${sample.component || 'base'}`;
+  return {
+    note: 'Rebuilds a single apk with the matching OpenWrt SDK. This is the first package of '
+      + 'the list; swap --package and --arch for any other row.',
+    cmd: clone + shellLines(
+      'uv run openwrt-rebuilder package',
+      `--package ${file}`,
+      `--arch ${sample.architecture}`,
+      `--release ${releaseArg(release)}`,
+      '--output ./out',
+    ),
+    published: `${DOWNLOADS_URL}/${feed}/${file}`,
+    publishedLabel: file,
+  };
+}
+
+function renderRebuild(pkgs) {
+  const info = rebuildInfo(pkgs);
+  if (!info) return null;
+  return el('details', { class: 'rebuild' }, [
+    el('summary', { class: 'rebuild-title', text: 'Rebuild locally' }),
+    el('div', { class: 'rebuild-body' }, [
+      el('p', { class: 'rebuild-note', text: info.note }),
+      el('pre', { class: 'rebuild-cmd' }, [el('code', { text: info.cmd })]),
+      el('p', { class: 'rebuild-note' }, [
+        'Needs ',
+        el('a', { href: 'https://docs.astral.sh/uv/', target: '_blank', rel: 'noreferrer', text: 'uv' }),
+        ' and the usual OpenWrt build dependencies. The result lands in ',
+        el('code', { text: './out' }),
+        ' — compare it against ',
+        el('a', { href: info.published, target: '_blank', rel: 'noreferrer', text: info.publishedLabel }),
+        ' with ',
+        el('code', { text: 'diffoscope' }),
+        '.',
+      ]),
+    ]),
+  ]);
 }
 
 // good/bad/fail/unknown lists. Bad opens by default (the actionable bucket);
 // the rest stay collapsed unless a search is active.
 function renderStatusGroups(pkgs) {
+  const cmp = (SORTS.find((s) => s.id === sort) || SORTS[0]).cmp;
   const buckets = { GOOD: [], BAD: [], FAIL: [], UNKWN: [] };
   for (const p of pkgs) buckets[statusOf(p)].push(p);
   const out = [];
   for (const status of STATUS_ORDER) {
-    const list = buckets[status];
+    const list = buckets[status].sort(cmp);
     if (!list.length) continue;
     const cls = STATUS_LABEL[status];
     const attrs = { class: `status-group ${cls}` };
@@ -262,7 +385,7 @@ function render() {
     ]));
 
     const body = el('div', { class: 'suite-body' });
-    for (const [component, compPkgs] of groupBy(relPkgs, (p) => p.component || p.architecture || '(none)')) {
+    for (const [component, compPkgs] of sortGroups(groupBy(relPkgs, (p) => p.component || p.architecture || '(none)'))) {
       const c = tally(compPkgs);
       const sub = el('details', { class: 'subgroup' });
       if (search || c.BAD) sub.setAttribute('open', '');
@@ -271,6 +394,8 @@ function render() {
         countBar(c, 'subgroup-counts'),
       ]));
       const subBody = el('div', { class: 'subgroup-body' });
+      const rebuild = renderRebuild(compPkgs);
+      if (rebuild) subBody.appendChild(rebuild);
       for (const group of renderStatusGroups(compPkgs)) subBody.appendChild(group);
       sub.appendChild(subBody);
       body.appendChild(sub);
@@ -288,6 +413,8 @@ function readState() {
   const params = new URLSearchParams(location.search);
   const distro = params.get('distro');
   if (DISTROS.some((d) => d.id === distro)) currentDistro = distro;
+  const s = params.get('sort');
+  if (SORTS.some((o) => o.id === s)) sort = s;
   search = (params.get('q') || '').trim();
 }
 
@@ -296,6 +423,7 @@ function readState() {
 function writeState({ push = false } = {}) {
   const params = new URLSearchParams();
   if (currentDistro !== DISTROS[0].id) params.set('distro', currentDistro);
+  if (sort !== SORTS[0].id) params.set('sort', sort);
   if (search) params.set('q', search);
   const qs = params.toString();
   const url = qs ? `${location.pathname}?${qs}` : location.pathname;
@@ -309,6 +437,7 @@ function onPopState() {
   const input = document.getElementById('search');
   if (input) input.value = search;
   renderDistroButtons();
+  renderSortButtons();
   if (currentDistro !== prev) load();
   else render();
 }
@@ -334,6 +463,29 @@ function renderDistroButtons() {
   }
 }
 
+// Sorting only reorders the already-rendered leaf lists, so it re-renders in
+// place — no refetch, and the URL is rewritten (not pushed) like the search.
+function renderSortButtons() {
+  const group = document.getElementById('sort-buttons');
+  if (!group) return;
+  group.innerHTML = '';
+  for (const s of SORTS) {
+    const btn = el('button', {
+      class: `sort-btn${s.id === sort ? ' active' : ''}`,
+      type: 'button',
+      text: s.label,
+    });
+    btn.addEventListener('click', () => {
+      if (sort === s.id) return;
+      sort = s.id;
+      writeState();
+      renderSortButtons();
+      render();
+    });
+    group.appendChild(btn);
+  }
+}
+
 async function load() {
   const overview = document.getElementById('overview');
   const content = document.getElementById('content');
@@ -342,20 +494,24 @@ async function load() {
   allPkgs = [];
   dashboard = null;
 
-  try {
-    dashboard = await fetchJSON(`/api/v1/dashboard?distribution=${encodeURIComponent(currentDistro)}`);
-  } catch (err) {
-    console.error(err);
-  }
+  // Not fatal on its own: without the dashboard we lose the queue stats and the
+  // tree still stands.
+  const stats = fetchJSON(`/api/v1/dashboard?distribution=${encodeURIComponent(currentDistro)}`)
+    .catch((err) => { console.error(err); return null; });
 
   try {
-    allPkgs = collapseVersions(await fetchAll());
+    // seen_only leaves the daemon to pick the published version of each row, so
+    // this is the only bulk request the page makes: one row per package or
+    // image, superseded rebuilds left in the database where they belong.
+    allPkgs = collapseVersions(await fetchPaged('/api/v1/packages/binary', { seen_only: 'true' }));
   } catch (err) {
     console.error(err);
     content.innerHTML = '';
     content.appendChild(el('div', { class: 'error', text: `Failed to load: ${err.message}` }));
     return;
   }
+
+  dashboard = await stats;
 
   renderOverview();
   render();
@@ -364,6 +520,7 @@ async function load() {
 function main() {
   readState();
   renderDistroButtons();
+  renderSortButtons();
   const input = document.getElementById('search');
   if (input) {
     input.value = search;
