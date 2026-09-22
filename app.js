@@ -28,14 +28,12 @@ const PAGE_LIMIT = 50000;
 const DOWNLOADS_URL = 'https://downloads.openwrt.org';
 const REBUILDER_REPO = 'https://github.com/aparcar/openwrt-rebuilder';
 
-// Daily history written by collect_stats.py, served next to this file rather
-// than by the daemon. One chart per dataset, each on the release whose verdicts
-// move: SNAPSHOT for firmware, the release being rebuilt for packages. Keep in
-// step with SERIES in collect_stats.py.
-const STATS_URL = 'stats.json';
+// Daily history written by collect_stats.py, one file per dataset, served next
+// to this file rather than by the daemon. Which release each file tracks is set
+// there (SERIES) and read back from the file, so it isn't repeated here.
 const TRENDS = {
-  'openwrt-package': { series: 'openwrt-package/25.12.5', label: '25.12.5 packages' },
-  'openwrt-image': { series: 'openwrt-image/SNAPSHOT', label: 'SNAPSHOT firmware' },
+  'openwrt-package': { file: 'stats-packages.json', noun: 'packages' },
+  'openwrt-image': { file: 'stats-firmware.json', noun: 'firmware' },
 };
 
 const DISTROS = [
@@ -82,7 +80,7 @@ function sortGroups(groups) {
 let currentDistro = DISTROS[0].id;
 let allPkgs = [];               // newest version of each image (deduped)
 let dashboard = null;           // reproducibility + queue stats
-let trendStats = null;          // promise of stats.json, fetched once
+const trendStats = new Map();   // stats file -> promise of its contents, fetched once
 let search = '';
 let sort = SORTS[0].id;
 
@@ -286,15 +284,15 @@ function svg(tag, attrs = {}, children = []) {
   return node;
 }
 
-// stats.json is missing until collect_stats.py has run once; that just means
-// no chart, so failures resolve to null.
-function loadTrendStats() {
-  if (!trendStats) {
-    trendStats = fetch(STATS_URL, { cache: 'no-cache' })
+// A stats file is missing until collect_stats.py has recorded that dataset
+// once; that just means no chart, so failures resolve to null.
+function loadTrendStats(file) {
+  if (!trendStats.has(file)) {
+    trendStats.set(file, fetch(file, { cache: 'no-cache' })
       .then((res) => (res.ok ? res.json() : null))
-      .catch((err) => { console.error(err); return null; });
+      .catch((err) => { console.error(err); return null; }));
   }
-  return trendStats;
+  return trendStats.get(file);
 }
 
 // Collector entries use lowercase keys; reproRate wants the status names.
@@ -474,17 +472,22 @@ function renderTrendTable(points) {
   ]);
 }
 
-function renderTrend(stats) {
+// Each dataset has its own file, so a slow one can land after the reader has
+// switched away; it's dropped then rather than drawn under the wrong dataset.
+function renderTrend(distro, stats) {
   const section = document.getElementById('trend');
-  if (!section) return;
+  if (!section || distro !== currentDistro) return;
   section.innerHTML = '';
-  const conf = TRENDS[currentDistro];
-  const entries = conf && stats && stats.series && stats.series[conf.series];
-  const points = (entries || []).map(trendPoint).filter((p) => p.total > 0 && !Number.isNaN(p.t));
-  if (!points.length) { section.hidden = true; return; }
+  const conf = TRENDS[distro];
+  // Only the release the file currently tracks: after a release bump the older
+  // entries stay in the file, but they're a different package set.
+  const release = stats && stats.release;
+  const entries = ((stats && stats.points) || []).filter((e) => !e.release || e.release === release);
+  const points = entries.map(trendPoint).filter((p) => p.total > 0 && !Number.isNaN(p.t));
+  if (!conf || !points.length) { section.hidden = true; return; }
 
   section.appendChild(el('div', { class: 'trend-header' }, [
-    el('h2', { class: 'trend-title', text: `Results over time · ${conf.label}` }),
+    el('h2', { class: 'trend-title', text: `Results over time · ${release ? `${release} ` : ''}${conf.noun}` }),
     el('span', {
       class: 'trend-sub',
       text: `recorded daily · ${points.length} day${points.length === 1 ? '' : 's'}`,
@@ -749,9 +752,13 @@ async function load() {
   const stats = fetchJSON(`/api/v1/dashboard?distribution=${encodeURIComponent(currentDistro)}`)
     .catch((err) => { console.error(err); return null; });
   // Independent of the daemon and tiny, so it draws as soon as it lands rather
-  // than waiting on the tree. renderTrend reads currentDistro when it runs, so
-  // a switch in the meantime still gets the right chart (or none).
-  loadTrendStats().then(renderTrend);
+  // than waiting on the tree. The previous dataset's chart goes right away, not
+  // when this one arrives.
+  const trendSection = document.getElementById('trend');
+  if (trendSection) trendSection.hidden = true;
+  const distro = currentDistro;
+  const trend = TRENDS[distro];
+  if (trend) loadTrendStats(trend.file).then((s) => renderTrend(distro, s));
 
   try {
     // seen_only leaves the daemon to pick the published version of each row, so

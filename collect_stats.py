@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
-"""Record today's rebuild verdicts into stats.json, for the frontend's history chart.
+"""Record today's rebuild verdicts for the frontend's history charts.
 
 Run once a day. Each run tallies the currently-published rows of every series in
-SERIES and upserts one entry per UTC date, so re-running on the same day replaces
-that day's entry rather than adding a second one.
+SERIES and upserts one entry per UTC date into that series' own file, so
+re-running on the same day replaces that day's entry rather than adding a
+second one.
 
 Usage:
     ./collect_stats.py                                  # daemon on 127.0.0.1:8484
     ./collect_stats.py --api https://rebuilderd.n.aparcar.org
-    ./collect_stats.py --output /srv/stats.json         # write where Caddy serves it
+    ./collect_stats.py --output-dir /srv                # write where Caddy serves it
 
 Cron, shortly after the daily sync:
-    30 1 * * *  /path/to/collect_stats.py --output /srv/stats.json
+    30 1 * * *  /path/to/collect_stats.py --output-dir /srv
 """
 import argparse
 import datetime
@@ -22,13 +23,15 @@ import tempfile
 import urllib.parse
 import urllib.request
 
-# (distribution, release) pairs to track, one chart each in the frontend (see
-# TRENDS in app.js). Firmware is tracked on SNAPSHOT, whose images change daily;
+# (distribution, release, file) per chart; app.js maps each dataset to its file
+# (TRENDS) and takes the release from the file itself, so this is the one place
+# a release is set. Firmware is tracked on SNAPSHOT, whose images change daily;
 # packages on the release being rebuilt, whose verdicts move as the rebuild
-# works through it. Bump the package release here and in app.js together.
+# works through it. Bumping a release keeps the older entries in the file, each
+# tagged with its own release, and the chart starts over on the new one.
 SERIES = [
-    ("openwrt-package", "25.12.5"),
-    ("openwrt-image", "SNAPSHOT"),
+    ("openwrt-package", "25.12.5", "stats-packages.json"),
+    ("openwrt-image", "SNAPSHOT", "stats-firmware.json"),
 ]
 
 PAGE_LIMIT = 50000
@@ -77,7 +80,7 @@ def load(path):
         with open(path) as f:
             return json.load(f)
     except FileNotFoundError:
-        return {"series": {}}
+        return {"points": []}
 
 
 def save(path, data):
@@ -100,37 +103,42 @@ def save(path, data):
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--api", default="http://127.0.0.1:8484")
-    p.add_argument("--output", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "stats.json"))
+    p.add_argument("--output-dir", default=os.path.dirname(os.path.abspath(__file__)))
     args = p.parse_args()
     api = args.api.rstrip("/")
 
-    today = datetime.datetime.now(datetime.timezone.utc).date().isoformat()
-    data = load(args.output)
-    series = data.setdefault("series", {})
+    now = datetime.datetime.now(datetime.timezone.utc)
+    today = now.date().isoformat()
     missing = []
 
     by_distro = {}
-    for distribution, release in SERIES:
+    for distribution, release, filename in SERIES:
         if distribution not in by_distro:
             by_distro[distribution] = fetch_rows(api, distribution)
         rows = [r for r in by_distro[distribution] if r.get("release") == release]
         name = f"{distribution}/{release}"
         # No rows means the daemon has nothing seen for this release (a sync gap
         # or the release not being tracked) — not that everything regressed.
-        # Recording it would draw a cliff to 0%, so skip the day instead.
+        # Recording it would draw a cliff to 0%, so skip the day and leave the
+        # file as it was.
         if not rows:
             print(f"{name}: no seen rows, not recording {today}", file=sys.stderr)
             missing.append(name)
             continue
-        entry = {"date": today, **tally(rows)}
-        points = [e for e in series.get(name, []) if e.get("date") != today]
+        path = os.path.join(args.output_dir, filename)
+        data = load(path)
+        entry = {"date": today, "release": release, **tally(rows)}
+        points = [e for e in data.get("points", []) if e.get("date") != today]
         points.append(entry)
         points.sort(key=lambda e: e["date"])
-        series[name] = points
-        print(f"{name}: {entry}")
+        save(path, {
+            "distribution": distribution,
+            "release": release,
+            "updated": now.isoformat(timespec="seconds"),
+            "points": points,
+        })
+        print(f"{name} -> {filename}: {entry}")
 
-    data["updated"] = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
-    save(args.output, data)
     # Non-zero so cron mails someone when a series went unrecorded.
     return 1 if missing else 0
 
