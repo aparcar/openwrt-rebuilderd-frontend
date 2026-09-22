@@ -28,6 +28,16 @@ const PAGE_LIMIT = 50000;
 const DOWNLOADS_URL = 'https://downloads.openwrt.org';
 const REBUILDER_REPO = 'https://github.com/aparcar/openwrt-rebuilder';
 
+// Daily history written by collect_stats.py, served next to this file rather
+// than by the daemon. One chart per dataset, each on the release whose verdicts
+// move: SNAPSHOT for firmware, the release being rebuilt for packages. Keep in
+// step with SERIES in collect_stats.py.
+const STATS_URL = 'stats.json';
+const TRENDS = {
+  'openwrt-package': { series: 'openwrt-package/25.12.5', label: '25.12.5 packages' },
+  'openwrt-image': { series: 'openwrt-image/SNAPSHOT', label: 'SNAPSHOT firmware' },
+};
+
 const DISTROS = [
   { id: 'openwrt-package', label: 'Packages' },
   { id: 'openwrt-image', label: 'Firmware images' },
@@ -72,6 +82,7 @@ function sortGroups(groups) {
 let currentDistro = DISTROS[0].id;
 let allPkgs = [];               // newest version of each image (deduped)
 let dashboard = null;           // reproducibility + queue stats
+let trendStats = null;          // promise of stats.json, fetched once
 let search = '';
 let sort = SORTS[0].id;
 
@@ -247,6 +258,245 @@ function renderPkg(pkg) {
   if (links) row.appendChild(links);
 
   return el('li', {}, [row]);
+}
+
+// ---- results over time ----
+// A stacked area of the verdict counts per day, so the height is everything
+// tracked and each band is how much of it stands where. Good sits on the
+// baseline, where its growth reads straight off the axis; unknown, the
+// not-yet-rebuilt remainder, goes on top. That order also keeps green and red
+// adjacent only where they separate under deuteranopia (checked, ΔE 9.5).
+
+const SVG_NS = 'http://www.w3.org/2000/svg';
+const TREND_W = 1000;
+const TREND_H = 240;
+const TREND_PAD = { top: 14, right: 118, bottom: 26, left: 56 };
+const TREND_STACK = ['GOOD', 'BAD', 'FAIL', 'UNKWN']; // baseline up
+// Bands thinner than this (viewBox units) get no end label, which would only
+// collide with its neighbours; the legend, tooltip and table still carry it.
+const TREND_LABEL_MIN = 15;
+
+function svg(tag, attrs = {}, children = []) {
+  const node = document.createElementNS(SVG_NS, tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k === 'text') node.textContent = v;
+    else if (v != null) node.setAttribute(k, v);
+  }
+  for (const child of [].concat(children)) if (child) node.appendChild(child);
+  return node;
+}
+
+// stats.json is missing until collect_stats.py has run once; that just means
+// no chart, so failures resolve to null.
+function loadTrendStats() {
+  if (!trendStats) {
+    trendStats = fetch(STATS_URL, { cache: 'no-cache' })
+      .then((res) => (res.ok ? res.json() : null))
+      .catch((err) => { console.error(err); return null; });
+  }
+  return trendStats;
+}
+
+// Collector entries use lowercase keys; reproRate wants the status names.
+function trendPoint(e) {
+  const c = { GOOD: e.good || 0, BAD: e.bad || 0, FAIL: e.fail || 0, UNKWN: e.unknown || 0 };
+  return {
+    date: e.date, counts: c, total: c.GOOD + c.BAD + c.FAIL + c.UNKWN,
+    rate: reproRate(c), t: Date.parse(`${e.date}T00:00:00Z`),
+  };
+}
+
+const fmtCount = (n) => n.toLocaleString('en');
+
+// A round axis top at or above max: 1, 2 or 5 times a power of ten per step,
+// about four steps.
+function niceScale(max) {
+  if (max <= 0) return { top: 1, step: 1 };
+  const raw = max / 4;
+  const pow = 10 ** Math.floor(Math.log10(raw));
+  const step = [1, 2, 5, 10].map((m) => m * pow).find((s) => s >= raw);
+  return { top: Math.ceil(max / step) * step, step };
+}
+
+// Formatted in UTC: the collector dates its entries in UTC, and a local-time
+// Date would put a day's point under the previous day west of Greenwich.
+function shortDate(t) {
+  return new Date(t).toLocaleDateString('en', { month: 'short', day: 'numeric', timeZone: 'UTC' });
+}
+
+function renderTrendTooltip(tip, p) {
+  tip.innerHTML = '';
+  tip.appendChild(el('div', { class: 'trend-tip-date', text: p.date }));
+  tip.appendChild(el('div', {}, [el('strong', { text: fmtCount(p.total) }), ' total']));
+  // top of the stack first, so the rows read in the order the bands sit
+  for (const s of [...TREND_STACK].reverse()) {
+    tip.appendChild(el('div', { class: 'trend-tip-row' }, [
+      el('span', { class: `trend-key ${STATUS_LABEL[s]}` }),
+      el('strong', { text: fmtCount(p.counts[s]) }), ` ${STATUS_LABEL[s]}`,
+    ]));
+  }
+  if (p.rate != null) tip.appendChild(el('div', { class: 'trend-tip-rate' }, [
+    el('strong', { text: `${p.rate.toFixed(1)}%` }), ' of rebuilt reproducible',
+  ]));
+}
+
+function renderTrendChart(points) {
+  const x0 = TREND_PAD.left;
+  const x1 = TREND_W - TREND_PAD.right;
+  const y0 = TREND_H - TREND_PAD.bottom;
+  const y1 = TREND_PAD.top;
+  const tMin = points[0].t;
+  const tMax = points[points.length - 1].t;
+  // a lone day sits mid-plot instead of dividing by a zero-length range
+  const xOf = (t) => (tMax === tMin ? (x0 + x1) / 2 : x0 + ((t - tMin) / (tMax - tMin)) * (x1 - x0));
+  const scale = niceScale(Math.max(...points.map((p) => p.total)));
+  const yOf = (n) => y0 - (n / scale.top) * (y0 - y1);
+
+  const chart = svg('svg', {
+    class: 'trend-svg', viewBox: `0 0 ${TREND_W} ${TREND_H}`, role: 'img', tabindex: '0',
+    'aria-label': `Results per day by verdict, stacked, ${points[0].date} to ${points[points.length - 1].date}. `
+      + 'Use the arrow keys to step through days; the table below lists every value.',
+  });
+
+  for (let v = 0; v <= scale.top; v += scale.step) {
+    const y = yOf(v);
+    chart.appendChild(svg('line', { class: 'trend-grid', x1: x0, x2: x1, y1: y, y2: y }));
+    chart.appendChild(svg('text', { class: 'trend-axis', x: x0 - 8, y: y + 4, 'text-anchor': 'end', text: fmtCount(v) }));
+  }
+
+  // At most ~6 date ticks, picked from the recorded days so each sits on a point.
+  const step = Math.max(1, Math.ceil(points.length / 6));
+  for (let i = 0; i < points.length; i += step) {
+    chart.appendChild(svg('text', {
+      class: 'trend-axis', x: xOf(points[i].t), y: y0 + 18, 'text-anchor': 'middle', text: shortDate(points[i].t),
+    }));
+  }
+
+  // An area needs two x positions, so a lone day becomes a 24-unit column.
+  const mid = xOf(points[0].t);
+  const cols = points.length > 1
+    ? points.map((p) => ({ x: xOf(p.t), p }))
+    : [{ x: mid - 12, p: points[0] }, { x: mid + 12, p: points[0] }];
+  const f = (n) => n.toFixed(1);
+
+  let below = cols.map(() => 0);
+  const ends = [];
+  for (const s of TREND_STACK) {
+    const above = cols.map((c, i) => below[i] + c.p.counts[s]);
+    if (cols.some((c) => c.p.counts[s] > 0)) {
+      const top = cols.map((c, i) => `${f(c.x)},${f(yOf(above[i]))}`);
+      const bottom = cols.map((c, i) => `${f(c.x)},${f(yOf(below[i]))}`).reverse();
+      chart.appendChild(svg('path', {
+        class: `trend-band ${STATUS_LABEL[s]}`, d: `M${top.join('L')}L${bottom.join('L')}Z`,
+      }));
+      const n = cols.length - 1;
+      ends.push({ s, yTop: yOf(above[n]), yBottom: yOf(below[n]), count: cols[n].p.counts[s] });
+    }
+    below = above;
+  }
+
+  // Latest count of each band, beside where the band ends.
+  for (const e of ends) {
+    if (e.yBottom - e.yTop < TREND_LABEL_MIN) continue;
+    chart.appendChild(svg('text', {
+      class: 'trend-end', x: x1 + 8, y: (e.yTop + e.yBottom) / 2 + 4,
+      text: `${fmtCount(e.count)} ${STATUS_LABEL[e.s]}`,
+    }));
+  }
+
+  const cross = svg('line', { class: 'trend-cross', y1: y1, y2: y0, visibility: 'hidden' });
+  chart.appendChild(cross);
+
+  const wrap = el('div', { class: 'trend-chart' }, [chart]);
+  const tip = el('div', { class: 'trend-tip', hidden: '' });
+  wrap.appendChild(tip);
+
+  let active = -1;
+  const show = (i) => {
+    active = i;
+    const p = points[i];
+    const x = xOf(p.t);
+    cross.setAttribute('x1', x);
+    cross.setAttribute('x2', x);
+    cross.setAttribute('visibility', 'visible');
+    renderTrendTooltip(tip, p);
+    tip.hidden = false;
+    // viewBox units -> CSS pixels; flip to the left past the middle so the
+    // tooltip never hangs off the right edge
+    const width = chart.getBoundingClientRect().width;
+    const left = x * (width / TREND_W);
+    tip.style.left = x > TREND_W / 2 ? '' : `${left + 12}px`;
+    tip.style.right = x > TREND_W / 2 ? `${width - left + 12}px` : '';
+  };
+  const hide = () => {
+    active = -1;
+    cross.setAttribute('visibility', 'hidden');
+    tip.hidden = true;
+  };
+
+  // The crosshair snaps to the nearest recorded day, so the pointer never has
+  // to land on the 2px line itself.
+  chart.addEventListener('pointermove', (e) => {
+    const rect = chart.getBoundingClientRect();
+    const x = ((e.clientX - rect.left) / rect.width) * TREND_W;
+    let best = 0;
+    for (let i = 1; i < points.length; i++) {
+      if (Math.abs(xOf(points[i].t) - x) < Math.abs(xOf(points[best].t) - x)) best = i;
+    }
+    if (best !== active) show(best);
+  });
+  chart.addEventListener('pointerleave', hide);
+  chart.addEventListener('blur', hide);
+  chart.addEventListener('focus', () => show(points.length - 1));
+  chart.addEventListener('keydown', (e) => {
+    if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+    e.preventDefault();
+    const from = active < 0 ? points.length - 1 : active;
+    show(Math.min(points.length - 1, Math.max(0, from + (e.key === 'ArrowRight' ? 1 : -1))));
+  });
+
+  return wrap;
+}
+
+// Every value the chart shows, reachable without hovering. Newest first.
+function renderTrendTable(points) {
+  const head = el('tr', {}, ['Date', 'Total', 'Good', 'Bad', 'Fail', 'Unknown', 'Reproducible']
+    .map((h) => el('th', { text: h })));
+  const rows = [...points].reverse().map((p) => el('tr', {}, [
+    el('td', { text: p.date }),
+    el('td', { text: fmtCount(p.total) }),
+    ...TREND_STACK.map((s) => el('td', { text: fmtCount(p.counts[s]) })),
+    el('td', { text: p.rate == null ? '–' : `${p.rate.toFixed(1)}%` }),
+  ]));
+  return el('details', { class: 'trend-table' }, [
+    el('summary', { text: 'Show as table' }),
+    el('table', {}, [el('thead', {}, [head]), el('tbody', {}, rows)]),
+  ]);
+}
+
+function renderTrend(stats) {
+  const section = document.getElementById('trend');
+  if (!section) return;
+  section.innerHTML = '';
+  const conf = TRENDS[currentDistro];
+  const entries = conf && stats && stats.series && stats.series[conf.series];
+  const points = (entries || []).map(trendPoint).filter((p) => p.total > 0 && !Number.isNaN(p.t));
+  if (!points.length) { section.hidden = true; return; }
+
+  section.appendChild(el('div', { class: 'trend-header' }, [
+    el('h2', { class: 'trend-title', text: `Results over time · ${conf.label}` }),
+    el('span', {
+      class: 'trend-sub',
+      text: `recorded daily · ${points.length} day${points.length === 1 ? '' : 's'}`,
+    }),
+  ]));
+  // Swatches mirror the bands, in stack order; the names stay in ink.
+  const legend = el('ul', { class: 'trend-legend' }, TREND_STACK.map((s) => el('li', {}, [
+    el('span', { class: `trend-swatch ${STATUS_LABEL[s]}` }), STATUS_LABEL[s],
+  ])));
+  const body = el('div', { class: 'trend-body' }, [legend, renderTrendChart(points), renderTrendTable(points)]);
+  section.appendChild(body);
+  section.hidden = false;
 }
 
 // ---- rebuild instructions ----
@@ -498,6 +748,10 @@ async function load() {
   // tree still stands.
   const stats = fetchJSON(`/api/v1/dashboard?distribution=${encodeURIComponent(currentDistro)}`)
     .catch((err) => { console.error(err); return null; });
+  // Independent of the daemon and tiny, so it draws as soon as it lands rather
+  // than waiting on the tree. renderTrend reads currentDistro when it runs, so
+  // a switch in the meantime still gets the right chart (or none).
+  loadTrendStats().then(renderTrend);
 
   try {
     // seen_only leaves the daemon to pick the published version of each row, so

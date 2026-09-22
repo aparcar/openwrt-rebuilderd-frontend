@@ -193,6 +193,87 @@ main { max-width: 1100px; margin: 1.25rem auto; padding: 0 1.5rem 3rem; }
 
 .suite-body { padding: 0.15rem 1.25rem 1rem; }
 
+/* ---- reproducibility over time ---- */
+.trend {
+  background: var(--panel);
+  color: var(--ink);
+  border: 2px outset #d6e4ee;
+  margin-bottom: 1.25rem;
+}
+.trend-header {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  padding: 0.5rem 1.25rem;
+  background: var(--accent);
+  border-bottom: 1px solid var(--border);
+}
+.trend-title { margin: 0; font-size: 1.15rem; font-weight: bold; color: var(--slate-dark); }
+.trend-sub { margin-left: auto; font-size: 0.85rem; color: var(--muted); }
+.trend-body { padding: 0.75rem 1.25rem 1rem; }
+
+.trend-chart { position: relative; }
+.trend-svg { display: block; width: 100%; height: auto; overflow: visible; }
+.trend-svg:focus { outline: 1px dotted var(--slate-dark); outline-offset: 2px; }
+.trend-grid { stroke: #dde3e7; stroke-width: 1; shape-rendering: crispEdges; }
+.trend-axis { font-size: 12px; fill: var(--muted); }
+/* a panel-coloured edge on every band; neighbours share the boundary, so this
+   is a 2px gap between them, and the edge reads without leaning on green/red
+   contrast alone */
+.trend-band { stroke: var(--panel); stroke-width: 2; stroke-linejoin: round; vector-effect: non-scaling-stroke; }
+.trend-band.good { fill: var(--status-good); }
+.trend-band.bad { fill: var(--status-bad); }
+.trend-band.fail { fill: var(--status-fail); }
+.trend-band.unknown { fill: var(--status-unknown); }
+.trend-end { font-size: 12px; fill: var(--ink); }
+
+.trend-legend {
+  list-style: none;
+  margin: 0 0 0.4rem;
+  padding: 0;
+  display: flex;
+  gap: 1rem;
+  font-size: 0.8rem;
+}
+.trend-legend li { display: flex; align-items: center; gap: 0.3rem; }
+.trend-swatch { display: inline-block; width: 0.7rem; height: 0.7rem; }
+.trend-swatch.good { background: var(--status-good); }
+.trend-swatch.bad { background: var(--status-bad); }
+.trend-swatch.fail { background: var(--status-fail); }
+.trend-swatch.unknown { background: var(--status-unknown); }
+.trend-cross { stroke: var(--muted); stroke-width: 1; shape-rendering: crispEdges; pointer-events: none; }
+
+.trend-tip {
+  position: absolute;
+  top: 0.25rem;
+  background: #ffffff;
+  border: 1px solid var(--border);
+  box-shadow: 2px 2px 0 rgba(0, 0, 0, 0.2);
+  padding: 0.35rem 0.55rem;
+  font-size: 0.8rem;
+  line-height: 1.35;
+  pointer-events: none;
+  white-space: nowrap;
+}
+.trend-tip[hidden] { display: none; }
+.trend-tip-date { color: var(--muted); font-family: "Courier New", monospace; }
+.trend-tip-row { display: flex; align-items: center; gap: 0.3rem; }
+.trend-tip-rate { margin-top: 0.2rem; padding-top: 0.2rem; border-top: 1px solid #dde3e7; color: var(--muted); }
+/* short line keys in the status colours; the text itself stays in ink */
+.trend-key { display: inline-block; width: 0.8rem; height: 2px; }
+.trend-key.good { background: var(--status-good); }
+.trend-key.bad { background: var(--status-bad); }
+.trend-key.fail { background: var(--status-fail); }
+.trend-key.unknown { background: var(--status-unknown); }
+
+.trend-table { margin-top: 0.5rem; font-size: 0.85rem; }
+.trend-table summary { cursor: pointer; color: var(--slate-dark); }
+.trend-table table { border-collapse: collapse; margin-top: 0.4rem; }
+.trend-table th, .trend-table td { padding: 0.1rem 0.75rem 0.1rem 0; text-align: right; }
+.trend-table th:first-child, .trend-table td:first-child { text-align: left; font-family: "Courier New", monospace; }
+.trend-table th { border-bottom: 1px solid var(--border); font-weight: bold; }
+
 .suite-title { margin: 0; font-size: 1.15rem; font-weight: bold; color: var(--slate-dark); }
 .suite-counts { margin-left: auto; font-size: 0.85rem; color: var(--muted); }
 .suite-counts .count { font-weight: bold; margin-right: 0.75rem; }
