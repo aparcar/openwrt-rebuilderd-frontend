@@ -1,4 +1,3 @@
 stats-*.json
 .stats-*.json
 __pycache__/
-serve.py

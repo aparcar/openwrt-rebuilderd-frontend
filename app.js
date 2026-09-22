@@ -2,23 +2,34 @@
 
 // Status page for an OpenWrt rebuilderd instance.
 //
-// It fetches the currently-published record of each package or image for the
-// main tree (grouped release -> component -> status) and shows the latest
-// verdict for each — one row per package or image, no rebuild history. The
+// OpenWrt is one rebuilderd distribution, rebuilt a whole target at a time: one
+// source package (job) per target and release, whose single build produces all
+// of that target's artifacts. Each artifact is a binary package whose
+// `architecture` is the target ("x86/64") and whose `component` is its kind:
+// firmware, packages or kmods. The page has a tab per kind and shows it as
+// release -> target -> status, with the latest verdict of each artifact.
+//
+// Volume decides how each tab loads. Firmware images and packages number a few
+// dozen per target and load for every target at once, filtered server-side by
+// component. Kmods are ~93% of everything (~110k rows for SNAPSHOT), so that
+// tab lists the targets from their jobs and loads one target's kmods only when
+// it is opened.
+//
+// Rows are the latest verdict only — no rebuild history. The
+// history used to come from an unfiltered /api/v1/builds, which is every
 // history used to come from an unfiltered /api/v1/builds, which is every
 // rebuild ever recorded: on a 20GB database that is a multi-hundred-megabyte
 // response the page then folded back down to a handful of rows per package.
 // Whoever wants the older runs can ask the daemon for them directly.
 //
 // The daemon does the filtering, via `seen_only`: asking it for every version
-// and reducing here meant pulling 3x the rows (15k against 5k for images, 8MB
-// of JSON). The flag is only as good as the last sync, though — it is scoped
-// per (distribution, release, architecture) with no component, so a target
-// syncing on its own can leave the rest marked unseen, and anything unseen is
-// simply absent from the page rather than flagged. If images or packages you
-// expect are missing, that is the first thing to check.
+// and reducing here would pull superseded rows as well. The flag is only as
+// good as the last sync, though: anything unseen is simply absent from the
+// page rather than flagged. If artifacts you expect are missing, that is the
+// first thing to check.
 
 const API_BASE = (typeof window !== 'undefined' && window.REBUILDERD_API) || '';
+const DISTRIBUTION = 'openwrt';
 // One big page instead of many small ones. The daemon caps nothing, and paging
 // is a cursor (`after`), so every page costs a full round-trip before the next
 // can start: the images dataset took 16 sequential requests and ~18s at 1000 a
@@ -32,14 +43,22 @@ const REBUILDER_REPO = 'https://github.com/aparcar/openwrt-rebuilder';
 // to this file rather than by the daemon. Which release each file tracks is set
 // there (SERIES) and read back from the file, so it isn't repeated here.
 const TRENDS = {
-  'openwrt-package': { file: 'stats-packages.json', noun: 'packages' },
-  'openwrt-image': { file: 'stats-firmware.json', noun: 'firmware' },
+  firmware: { file: 'stats-firmware.json', noun: 'firmware images' },
+  packages: { file: 'stats-packages.json', noun: 'packages' },
+  kmods: { file: 'stats-kmods.json', noun: 'kmods' },
 };
 
-const DISTROS = [
-  { id: 'openwrt-package', label: 'Packages' },
-  { id: 'openwrt-image', label: 'Firmware images' },
+// One tab per component. `lazy` tabs list the targets and fetch a target's rows
+// when it is opened; `path` is where that kind is published under a target.
+// Filtering on component server-side also keeps out rows still in the old
+// layout (target in component, package arch in architecture) until a re-sync
+// relabels them.
+const VIEWS = [
+  { id: 'firmware', label: 'Firmware images', path: '', lazy: false },
+  { id: 'packages', label: 'Packages', path: 'packages/', lazy: false },
+  { id: 'kmods', label: 'Kmods', path: 'kmods/', lazy: true },
 ];
+const viewConf = () => VIEWS.find((v) => v.id === currentView);
 
 const STATUS_ORDER = ['BAD', 'FAIL', 'UNKWN', 'GOOD'];
 const STATUS_LABEL = { GOOD: 'good', BAD: 'bad', FAIL: 'fail', UNKWN: 'unknown' };
@@ -50,8 +69,8 @@ const byName = (a, b) => a.name.localeCompare(b.name, undefined, { numeric: true
 // rebuild, so the id tracks when this package was last checked. Not the binary
 // record's own id — that one is sync insertion order, which is alphabetical, so
 // using it made this sort a reverse-alphabetical one. Rows never rebuilt have no
-// build_id and sort last; images share one build per target, so both cases fall
-// back to name.
+// build_id and sort last; every artifact of a target shares its one build, so
+// both cases fall back to name.
 function byLastBuild(a, b) {
   if (a.build_id == null || b.build_id == null) {
     if (a.build_id == null && b.build_id == null) return byName(a, b);
@@ -66,10 +85,10 @@ const SORTS = [
   { id: 'recent', label: 'Last result', cmp: byLastBuild },
 ];
 
-// Target/arch groups take the same ordering as the rows inside them. Images are
-// why this exists: one run rebuilds a whole target, so every image in a group
-// carries that run's build_id and the row sort within a group is all ties — the
-// recency signal only shows up between groups.
+// Target groups take the same ordering as the rows inside them. This is where
+// that ordering shows: one run rebuilds a whole target, so every artifact in a
+// group carries that run's build_id and the row sort within a group is all
+// ties — the recency signal only shows up between groups.
 function sortGroups(groups) {
   if (sort !== 'recent') return groups; // groupBy already ordered them by name
   const newest = (pkgs) => pkgs.reduce((max, p) => (p.build_id > max ? p.build_id : max), -1);
@@ -77,9 +96,16 @@ function sortGroups(groups) {
     || a[0].localeCompare(b[0], undefined, { numeric: true }));
 }
 
-let currentDistro = DISTROS[0].id;
-let allPkgs = [];               // newest version of each image (deduped)
-let dashboard = null;           // reproducibility + queue stats
+let currentView = VIEWS[0].id;
+let allPkgs = [];               // eager tab: its rows, once loaded
+let sources = null;             // lazy tab: one job per target and release, once loaded
+const viewRows = new Map();     // eager tab id -> promise of its rows
+let sourcesLoad = null;         // promise of the jobs, shared by lazy tabs
+const targetRows = new Map();   // lazy key -> promise of one target's rows
+const loadedTargets = new Map(); // lazy key -> one target's rows, once they are in
+let dashboard = null;           // queue stats
+let dashboardLoad = null;       // promise of the dashboard, fetched once
+let viewReady = false;          // whether the current tab's data is in and drawn
 const trendStats = new Map();   // stats file -> promise of its contents, fetched once
 let search = '';
 let sort = SORTS[0].id;
@@ -146,7 +172,7 @@ async function fetchPaged(path, extra = {}) {
   let after = null;
   for (;;) {
     const params = new URLSearchParams({
-      distribution: currentDistro,
+      distribution: DISTRIBUTION,
       limit: String(PAGE_LIMIT),
       ...extra,
     });
@@ -181,6 +207,44 @@ function collapseVersions(records) {
   return latest;
 }
 
+// Each is fetched once and kept for the page's lifetime; a failed fetch is
+// forgotten so the next attempt retries it.
+function cached(map, key, fetcher) {
+  if (!map.has(key)) {
+    map.set(key, fetcher().catch((err) => { map.delete(key); throw err; }));
+  }
+  return map.get(key);
+}
+
+// Every target's artifacts of one kind.
+function loadViewRows(view) {
+  return cached(viewRows, view, async () => collapseVersions(
+    await fetchPaged('/api/v1/packages/binary', { component: view, seen_only: 'true' })));
+}
+
+// One job per target and release: the list a lazy tab is built from.
+function loadSources() {
+  if (!sourcesLoad) {
+    sourcesLoad = fetchPaged('/api/v1/packages/source', { seen_only: 'true' })
+      .catch((err) => { sourcesLoad = null; throw err; });
+  }
+  return sourcesLoad;
+}
+
+const targetKey = (view, job) => `${view}|${job.release}|${job.name}`;
+
+// One target's artifacts of one kind; a job's name is its target.
+function loadTarget(view, job) {
+  const key = targetKey(view, job);
+  return cached(targetRows, key, async () => {
+    const rows = collapseVersions(await fetchPaged('/api/v1/packages/binary', {
+      component: view, release: job.release, architecture: job.name, seen_only: 'true',
+    }));
+    loadedTargets.set(key, rows);
+    return rows;
+  });
+}
+
 // Share of rebuilt images that reproduced. Not-yet-built ones are excluded
 // rather than counted against the rate — they say nothing either way. Null when
 // nothing has been rebuilt yet.
@@ -204,18 +268,32 @@ function countBar(c, cls) {
 function renderOverview() {
   const overview = document.getElementById('overview');
   overview.innerHTML = '';
-  const c = tally(allPkgs);
-  const total = c.GOOD + c.BAD + c.FAIL + c.UNKWN;
-  const rate = reproRate(c);
   const j = (dashboard && dashboard.jobs) || {};
   const queued = (j.running || 0) + (j.available || 0) + (j.pending || 0);
 
-  const items = [
-    {
+  let first;
+  if (viewConf().lazy) {
+    // Counting a lazy tab's artifacts would mean loading all of them, which is
+    // what it exists to avoid; its targets' builds are the cheap summary.
+    const c = tally(sources || []);
+    first = {
+      name: 'Target builds',
+      big: String((sources || []).length),
+      sub: `${c.GOOD} good · ${c.BAD} bad · ${c.FAIL} fail · ${c.UNKWN} not built yet`,
+    };
+  } else {
+    const c = tally(allPkgs);
+    const total = c.GOOD + c.BAD + c.FAIL + c.UNKWN;
+    const rate = reproRate(c);
+    first = {
       name: 'Reproducibility',
       big: rate == null ? '–' : `${rate.toFixed(1)}%`,
       sub: `${c.GOOD} good · ${c.BAD} bad · ${c.FAIL} fail · ${c.UNKWN} unknown (${total})`,
-    },
+    };
+  }
+
+  const items = [
+    first,
     {
       name: 'Build queue',
       big: String(queued),
@@ -250,7 +328,6 @@ function renderPkg(pkg) {
     el('span', { class: `dot ${STATUS_LABEL[statusOf(pkg)]}` }),
     el('span', { class: 'pkg-name', text: pkg.name }),
     el('span', { class: 'pkg-version', text: pkg.version }),
-    el('span', { class: 'pkg-arch', text: pkg.architecture }),
   ]);
   const links = renderLinks(pkg);
   if (links) row.appendChild(links);
@@ -474,11 +551,11 @@ function renderTrendTable(points) {
 
 // Each dataset has its own file, so a slow one can land after the reader has
 // switched away; it's dropped then rather than drawn under the wrong dataset.
-function renderTrend(distro, stats) {
+function renderTrend(view, stats) {
   const section = document.getElementById('trend');
-  if (!section || distro !== currentDistro) return;
+  if (!section || view !== currentView) return;
   section.innerHTML = '';
-  const conf = TRENDS[distro];
+  const conf = TRENDS[view];
   // Only the release the file currently tracks: after a release bump the older
   // entries stay in the file, but they're a different package set.
   const release = stats && stats.release;
@@ -527,53 +604,30 @@ function shellLines(...lines) {
   return lines.join(' \\\n    ');
 }
 
-// What it takes to recreate this group's files: images are rebuilt a whole
-// target at a time and packages one apk at a time. A package command therefore
-// needs one concrete file, so it quotes the first of the group and leaves
-// swapping it to the reader.
-function rebuildInfo(pkgs) {
-  const first = pkgs[0];
-  const release = first && first.release;
-  if (!release) return null;
-  const clone = `git clone ${REBUILDER_REPO}\ncd openwrt-rebuilder\n`;
-
-  if (currentDistro === 'openwrt-image') {
-    const target = first.component || first.architecture;
-    if (!target) return null;
-    return {
-      note: 'Rebuilds every image of this target from source the way the buildbots do: '
-        + 'openwrt.git at the published commit, feeds and .config restored from the target\'s buildinfo.',
-      cmd: clone + shellLines(
-        'uv run openwrt-rebuilder firmware',
-        `--target ${target}`,
-        `--release ${releaseArg(release)}`,
-        '--output ./out',
-      ),
-      published: `${DOWNLOADS_URL}/${releasePath(release)}/targets/${target}/`,
-      publishedLabel: `the published images of ${target}`,
-    };
-  }
-
-  const sample = [...pkgs].sort(SORTS[0].cmp)[0];
-  const file = `${sample.name}-${sample.version}.apk`;
-  const feed = `${releasePath(release)}/packages/${sample.architecture}/${sample.component || 'base'}`;
+// What it takes to recreate this group's files. Every kind comes out of the
+// same whole-target build, so the command is the target's either way; only
+// where to compare against differs.
+function rebuildInfo(target, release) {
+  if (!target || !release) return null;
+  const conf = viewConf();
+  const published = `${DOWNLOADS_URL}/${releasePath(release)}/targets/${target}/${conf.path}`;
   return {
-    note: 'Rebuilds a single apk with the matching OpenWrt SDK. This is the first package of '
-      + 'the list; swap --package and --arch for any other row.',
-    cmd: clone + shellLines(
-      'uv run openwrt-rebuilder package',
-      `--package ${file}`,
-      `--arch ${sample.architecture}`,
+    note: 'Rebuilds the whole target from source the way the buildbots do: openwrt.git at the '
+      + 'published commit, feeds and .config restored from the target\'s buildinfo. One run '
+      + 'produces its firmware images, packages and kmods alike.',
+    cmd: `git clone ${REBUILDER_REPO}\ncd openwrt-rebuilder\n` + shellLines(
+      'uv run openwrt-rebuilder firmware',
+      `--target ${target}`,
       `--release ${releaseArg(release)}`,
       '--output ./out',
     ),
-    published: `${DOWNLOADS_URL}/${feed}/${file}`,
-    publishedLabel: file,
+    published,
+    publishedLabel: `the published ${conf.label.toLowerCase()} of ${target}`,
   };
 }
 
-function renderRebuild(pkgs) {
-  const info = rebuildInfo(pkgs);
+function renderRebuild(target, release) {
+  const info = rebuildInfo(target, release);
   if (!info) return null;
   return el('details', { class: 'rebuild' }, [
     el('summary', { class: 'rebuild-title', text: 'Rebuild locally' }),
@@ -616,7 +670,29 @@ function renderStatusGroups(pkgs) {
   return out;
 }
 
+// A release's collapsible panel; the first one starts open.
+function renderSuite(release, i, counts) {
+  const suite = el('details', { class: 'suite', id: `release-${release}` });
+  if (i === 0 || search) suite.setAttribute('open', '');
+  suite.appendChild(el('summary', { class: 'suite-header' }, [el('h2', { class: 'suite-title', text: release }), counts]));
+  return suite;
+}
+
+// The inside of an opened target: how to rebuild it, then its status lists.
+function renderTargetBody(target, release, pkgs) {
+  const body = el('div', { class: 'subgroup-body' });
+  const rebuild = renderRebuild(target, release);
+  if (rebuild) body.appendChild(rebuild);
+  for (const group of renderStatusGroups(pkgs)) body.appendChild(group);
+  return body;
+}
+
 function render() {
+  if (viewConf().lazy) renderLazy();
+  else renderEager();
+}
+
+function renderEager() {
   const content = document.getElementById('content');
   const count = document.getElementById('search-count');
   content.innerHTML = '';
@@ -630,27 +706,17 @@ function render() {
   }
 
   groupBy(shown, (p) => p.release || '(no release)').forEach(([release, relPkgs], i) => {
-    const suite = el('details', { class: 'suite', id: `release-${release}` });
-    if (i === 0 || search) suite.setAttribute('open', '');
-    suite.appendChild(el('summary', { class: 'suite-header' }, [
-      el('h2', { class: 'suite-title', text: release }),
-      countBar(tally(relPkgs), 'suite-counts'),
-    ]));
-
+    const suite = renderSuite(release, i, countBar(tally(relPkgs), 'suite-counts'));
     const body = el('div', { class: 'suite-body' });
-    for (const [component, compPkgs] of sortGroups(groupBy(relPkgs, (p) => p.component || p.architecture || '(none)'))) {
-      const c = tally(compPkgs);
+    for (const [target, targetPkgs] of sortGroups(groupBy(relPkgs, (p) => p.architecture || '(none)'))) {
+      const c = tally(targetPkgs);
       const sub = el('details', { class: 'subgroup' });
       if (search || c.BAD) sub.setAttribute('open', '');
       sub.appendChild(el('summary', { class: 'subgroup-title' }, [
-        el('span', { class: 'subgroup-name', text: component }),
+        el('span', { class: 'subgroup-name', text: target }),
         countBar(c, 'subgroup-counts'),
       ]));
-      const subBody = el('div', { class: 'subgroup-body' });
-      const rebuild = renderRebuild(compPkgs);
-      if (rebuild) subBody.appendChild(rebuild);
-      for (const group of renderStatusGroups(compPkgs)) subBody.appendChild(group);
-      sub.appendChild(subBody);
+      sub.appendChild(renderTargetBody(target, release, targetPkgs));
       body.appendChild(sub);
     }
     suite.appendChild(body);
@@ -658,24 +724,110 @@ function render() {
   });
 }
 
+// Targets come from their jobs, and each one's rows only once it is opened.
+// A search can only look inside targets already loaded, so an unloaded target
+// stays listed while its own name matches, and the count says how many were
+// searched.
+function lazyListed(view) {
+  const q = search.toLowerCase();
+  return (sources || []).filter((job) => {
+    if (!search || job.name.toLowerCase().includes(q)) return true;
+    const rows = loadedTargets.get(targetKey(view, job));
+    return rows && rows.some(matches);
+  });
+}
+
+function renderLazyCount(view) {
+  const jobs = sources || [];
+  const loaded = jobs.filter((job) => loadedTargets.has(targetKey(view, job))).length;
+  document.getElementById('search-count').textContent = search
+    ? `${lazyListed(view).length} of ${jobs.length} targets (${loaded} loaded and searched)`
+    : `${jobs.length} targets`;
+}
+
+function renderLazy() {
+  const content = document.getElementById('content');
+  content.innerHTML = '';
+  const view = currentView;
+  const listed = lazyListed(view);
+  renderLazyCount(view);
+
+  if (!listed.length) {
+    content.appendChild(el('p', { class: 'loading', text: search ? `No matches for "${search}".` : 'No targets yet.' }));
+    return;
+  }
+
+  groupBy(listed, (job) => job.release || '(no release)').forEach(([release, relJobs], i) => {
+    const suite = renderSuite(release, i, el('div', { class: 'suite-counts' }, [
+      el('span', { class: 'count', text: `${relJobs.length} targets` }),
+    ]));
+    const body = el('div', { class: 'suite-body' });
+    const cmp = (SORTS.find((s) => s.id === sort) || SORTS[0]).cmp;
+    for (const job of [...relJobs].sort(cmp)) body.appendChild(renderLazyTarget(view, job));
+    suite.appendChild(body);
+    content.appendChild(suite);
+  });
+}
+
+// Before loading, a target's header carries its job's build status; after, the
+// same counts an eager tab shows. Opening it the first time fetches the rows
+// and swaps in the loaded version, left open.
+function renderLazyTarget(view, job) {
+  const rows = loadedTargets.get(targetKey(view, job));
+  const sub = el('details', { class: 'subgroup' });
+  const st = statusOf(job);
+  const summary = rows
+    ? countBar(tally(rows), 'subgroup-counts')
+    : el('div', { class: 'subgroup-counts' }, [
+      el('span', { class: `count ${STATUS_LABEL[st]}`, text: `build ${st === 'UNKWN' ? 'pending' : STATUS_LABEL[st]}` }),
+      el('span', { class: 'count', text: 'open to load' }),
+    ]);
+  sub.appendChild(el('summary', { class: 'subgroup-title' }, [el('span', { class: 'subgroup-name', text: job.name }), summary]));
+
+  if (rows) {
+    const shown = rows.filter(matches);
+    if (search && shown.length) sub.setAttribute('open', '');
+    sub.appendChild(renderTargetBody(job.name, job.release, shown));
+    return sub;
+  }
+
+  const body = el('div', { class: 'subgroup-body' }, [el('p', { class: 'loading', text: 'Loading…' })]);
+  sub.appendChild(body);
+  sub.addEventListener('toggle', () => {
+    if (!sub.open) return;
+    loadTarget(view, job).then(() => {
+      if (view !== currentView) return;
+      const fresh = renderLazyTarget(view, job);
+      fresh.setAttribute('open', '');
+      sub.replaceWith(fresh);
+      renderLazyCount(view);
+    }).catch((err) => {
+      console.error(err);
+      body.innerHTML = '';
+      body.appendChild(el('div', { class: 'error', text: `Failed to load: ${err.message} — close and reopen to retry.` }));
+    });
+  });
+  return sub;
+}
+
 // ---- url state ----
-// The selected dataset and the search term live in the query string, so a
+// The selected view and the search term live in the query string, so a
 // filtered view can be bookmarked or shared. Defaults are left out to keep the
 // bare URL clean.
 function readState() {
   const params = new URLSearchParams(location.search);
-  const distro = params.get('distro');
-  if (DISTROS.some((d) => d.id === distro)) currentDistro = distro;
+  const view = params.get('view');
+  currentView = VIEWS.some((v) => v.id === view) ? view : VIEWS[0].id;
   const s = params.get('sort');
   if (SORTS.some((o) => o.id === s)) sort = s;
   search = (params.get('q') || '').trim();
 }
 
-// Switching dataset is a navigation (pushState); typing only rewrites the
+// Switching view is a navigation (pushState); typing only rewrites the
 // current entry, otherwise every keystroke would land in the history.
 function writeState({ push = false } = {}) {
   const params = new URLSearchParams();
-  if (currentDistro !== DISTROS[0].id) params.set('distro', currentDistro);
+  if (currentView !== VIEWS[0].id) params.set('view', currentView);
   if (sort !== SORTS[0].id) params.set('sort', sort);
   if (search) params.set('q', search);
   const qs = params.toString();
@@ -685,32 +837,32 @@ function writeState({ push = false } = {}) {
 }
 
 function onPopState() {
-  const prev = currentDistro;
+  const prev = currentView;
   readState();
   const input = document.getElementById('search');
   if (input) input.value = search;
-  renderDistroButtons();
+  renderViewButtons();
   renderSortButtons();
-  if (currentDistro !== prev) load();
-  else render();
+  if (currentView !== prev) showView();
+  else if (viewReady) render();
 }
 
 // ---- controls ----
-function renderDistroButtons() {
+function renderViewButtons() {
   const group = document.getElementById('distro-buttons');
   group.innerHTML = '';
-  for (const d of DISTROS) {
+  for (const v of VIEWS) {
     const btn = el('button', {
-      class: `distro-btn${d.id === currentDistro ? ' active' : ''}`,
+      class: `distro-btn${v.id === currentView ? ' active' : ''}`,
       type: 'button',
-      text: d.label,
+      text: v.label,
     });
     btn.addEventListener('click', () => {
-      if (currentDistro === d.id) return;
-      currentDistro = d.id;
+      if (currentView === v.id) return;
+      currentView = v.id;
       writeState({ push: true });
-      renderDistroButtons();
-      load();
+      renderViewButtons();
+      showView();
     });
     group.appendChild(btn);
   }
@@ -733,54 +885,60 @@ function renderSortButtons() {
       sort = s.id;
       writeState();
       renderSortButtons();
-      render();
+      if (viewReady) render();
     });
     group.appendChild(btn);
   }
 }
 
-async function load() {
-  const overview = document.getElementById('overview');
-  const content = document.getElementById('content');
-  overview.innerHTML = '<li class="loading">Loading…</li>';
-  content.innerHTML = '<p class="loading">Loading…</p>';
-  allPkgs = [];
-  dashboard = null;
-
-  // Not fatal on its own: without the dashboard we lose the queue stats and the
-  // tree still stands.
-  const stats = fetchJSON(`/api/v1/dashboard?distribution=${encodeURIComponent(currentDistro)}`)
-    .catch((err) => { console.error(err); return null; });
-  // Independent of the daemon and tiny, so it draws as soon as it lands rather
-  // than waiting on the tree. The previous dataset's chart goes right away, not
-  // when this one arrives.
+// Loads what the current tab needs (each tab's data is fetched once and kept)
+// and draws it. The chart is fetched on its own and may land first. Whatever
+// arrives after the reader has moved to another tab is left alone rather than
+// drawn over it.
+function showView() {
+  // The previous tab's chart goes right away, not when this one's arrives.
   const trendSection = document.getElementById('trend');
   if (trendSection) trendSection.hidden = true;
-  const distro = currentDistro;
-  const trend = TRENDS[distro];
-  if (trend) loadTrendStats(trend.file).then((s) => renderTrend(distro, s));
+  const view = currentView;
+  const trend = TRENDS[view];
+  if (trend) loadTrendStats(trend.file).then((s) => renderTrend(view, s));
 
-  try {
-    // seen_only leaves the daemon to pick the published version of each row, so
-    // this is the only bulk request the page makes: one row per package or
-    // image, superseded rebuilds left in the database where they belong.
-    allPkgs = collapseVersions(await fetchPaged('/api/v1/packages/binary', { seen_only: 'true' }));
-  } catch (err) {
+  const conf = viewConf();
+  viewReady = false;
+  document.getElementById('overview').innerHTML = '<li class="loading">Loading…</li>';
+  const content = document.getElementById('content');
+  content.innerHTML = '<p class="loading">Loading…</p>';
+  document.getElementById('search-count').textContent = '';
+
+  const data = conf.lazy ? loadSources() : loadViewRows(view);
+  Promise.all([data, dashboardLoad]).then(([d, dash]) => {
+    if (view !== currentView) return;
+    if (conf.lazy) sources = d;
+    else allPkgs = d;
+    dashboard = dash;
+    viewReady = true;
+    renderOverview();
+    render();
+  }).catch((err) => {
     console.error(err);
+    if (view !== currentView) return;
     content.innerHTML = '';
     content.appendChild(el('div', { class: 'error', text: `Failed to load: ${err.message}` }));
-    return;
-  }
+  });
+}
 
-  dashboard = await stats;
-
-  renderOverview();
-  render();
+function load() {
+  // Not fatal on its own: without the dashboard we lose the queue stats and the
+  // tree still stands. It covers the whole distribution, every kind together,
+  // since the daemon has no finer scope for it.
+  dashboardLoad = fetchJSON(`/api/v1/dashboard?distribution=${encodeURIComponent(DISTRIBUTION)}`)
+    .catch((err) => { console.error(err); return null; });
+  showView();
 }
 
 function main() {
   readState();
-  renderDistroButtons();
+  renderViewButtons();
   renderSortButtons();
   const input = document.getElementById('search');
   if (input) {
@@ -788,7 +946,7 @@ function main() {
     input.addEventListener('input', (e) => {
       search = (e.target.value || '').trim();
       writeState();
-      render();
+      if (viewReady) render();
     });
   }
   window.addEventListener('popstate', onPopState);

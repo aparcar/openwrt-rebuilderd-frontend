@@ -422,14 +422,6 @@ main { max-width: 1100px; margin: 1.25rem auto; padding: 0 1.5rem 3rem; }
 .pkg-name { font-weight: bold; color: var(--ink); }
 .pkg-version { color: var(--muted); font-size: 0.82rem; }
 
-.pkg-arch {
-  font-size: 0.72rem;
-  color: var(--slate-dark);
-  background: var(--accent);
-  border: 1px solid var(--border);
-  padding: 0 0.35rem;
-}
-
 .pkg-links { margin-left: auto; display: inline-flex; gap: 0.35rem; }
 .pkg-links a {
   font-size: 0.78rem;

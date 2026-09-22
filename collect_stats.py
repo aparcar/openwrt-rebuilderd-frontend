@@ -23,15 +23,21 @@ import tempfile
 import urllib.parse
 import urllib.request
 
-# (distribution, release, file) per chart; app.js maps each dataset to its file
+# OpenWrt is one rebuilderd distribution; an artifact's kind is its component
+# (firmware, packages or kmods) and its target is its architecture.
+DISTRIBUTION = "openwrt"
+
+# (component, release, file) per chart; app.js maps each tab to its file
 # (TRENDS) and takes the release from the file itself, so this is the one place
-# a release is set. Firmware is tracked on SNAPSHOT, whose images change daily;
-# packages on the release being rebuilt, whose verdicts move as the rebuild
-# works through it. Bumping a release keeps the older entries in the file, each
+# a release is set. Bumping a release keeps the older entries in the file, each
 # tagged with its own release, and the chart starts over on the new one.
+#
+# Kmods are ~93% of all artifacts (~110k rows for SNAPSHOT, a few tens of MB).
+# Fine once a day next to the daemon; it's the browser that must not do this.
 SERIES = [
-    ("openwrt-package", "25.12.5", "stats-packages.json"),
-    ("openwrt-image", "SNAPSHOT", "stats-firmware.json"),
+    ("firmware", "SNAPSHOT", "stats-firmware.json"),
+    ("packages", "SNAPSHOT", "stats-packages.json"),
+    ("kmods", "SNAPSHOT", "stats-kmods.json"),
 ]
 
 PAGE_LIMIT = 50000
@@ -42,11 +48,14 @@ def fetch_json(url):
         return json.load(resp)
 
 
-def fetch_rows(api, distribution):
-    """Every seen row of a distribution, following the `after` cursor."""
+def fetch_rows(api, component, release):
+    """Every seen artifact of one kind and release, following the `after` cursor."""
     rows, after = [], None
     while True:
-        params = {"distribution": distribution, "limit": PAGE_LIMIT, "seen_only": "true"}
+        params = {
+            "distribution": DISTRIBUTION, "component": component, "release": release,
+            "limit": PAGE_LIMIT, "seen_only": "true",
+        }
         if after is not None:
             params["after"] = after
         page = fetch_json(f"{api}/api/v1/packages/binary?{urllib.parse.urlencode(params)}")
@@ -111,12 +120,11 @@ def main():
     today = now.date().isoformat()
     missing = []
 
-    by_distro = {}
-    for distribution, release, filename in SERIES:
-        if distribution not in by_distro:
-            by_distro[distribution] = fetch_rows(api, distribution)
-        rows = [r for r in by_distro[distribution] if r.get("release") == release]
-        name = f"{distribution}/{release}"
+    for component, release, filename in SERIES:
+        # Belt and braces: the daemon filters, but a row still in the old layout
+        # (target in component) must never be counted as a kind.
+        rows = [r for r in fetch_rows(api, component, release) if r.get("component") == component]
+        name = f"{component}/{release}"
         # No rows means the daemon has nothing seen for this release (a sync gap
         # or the release not being tracked) — not that everything regressed.
         # Recording it would draw a cliff to 0%, so skip the day and leave the
@@ -132,7 +140,8 @@ def main():
         points.append(entry)
         points.sort(key=lambda e: e["date"])
         save(path, {
-            "distribution": distribution,
+            "distribution": DISTRIBUTION,
+            "component": component,
             "release": release,
             "updated": now.isoformat(timespec="seconds"),
             "points": points,
